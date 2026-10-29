@@ -281,20 +281,39 @@ In data we have divided into **7 buckets** of data that contains different types
 
 # Technologies Used
 
-- Python
-- Streamlit
-- Flask/FastAPI
-- LangChain
-- Hugging Face Transformers
-- FAISS / Vector Database
-- BM25
-- BGE Embeddings
-- BGE Reranker
-- Qwen-2.5-7B-Instruct
-- XGBoost
-- SHAP
-- Pandas
-- NumPy
+
+\- Python
+
+\- Streamlit
+
+\- FastAPI
+- Uvicorn
+- Docker
+- Docker Compose
+- Qdrant
+- Ollama
+
+\- LangChain
+
+\- Hugging Face Transformers
+
+\- FAISS / Vector Database
+
+\- BM25
+
+\- BGE Embeddings
+
+\- BGE Reranker
+
+\- Qwen-2.5-7B-Instruct
+
+\- XGBoost
+
+\- SHAP
+
+\- Pandas
+
+\- NumPy
 
 ---
 
@@ -345,7 +364,7 @@ pip install -r requirements.txt
 ## Start the Backend
 
 ```bash
-python app/server.py
+uvicorn app.r_server:app --host 0.0.0.0 --port 5001
 ```
 
 ---
@@ -353,9 +372,57 @@ python app/server.py
 ## Start the Frontend
 
 ```bash
-streamlit run app/app.py
+streamlit run app/r_app.py
+```
+# Run with Docker Compose
+
+The project can also be run using Docker Compose. The services are separated into a Streamlit frontend, FastAPI backend, Qdrant vector database, and Ollama model server.
+
+Make sure Docker Desktop is running, then execute these commands from the directory containing `docker-compose.yml`:
+
+Build the images and start all services:
+
+```bash
+docker compose up -d --build
 ```
 
+Check running containers:
+
+```bash
+docker compose ps
+```
+
+View logs:
+
+```bash
+docker compose logs -f backend
+```
+
+Download the model in Ollama if it is not already present:
+
+```bash
+docker compose exec ollama ollama pull qwen2.5:7b
+```
+
+Open the application and service endpoints:
+
+| Service | Local URL |
+|---|---|
+| Streamlit frontend | http://localhost:8501 |
+| FastAPI backend | http://localhost:5001 |
+| FastAPI Swagger docs | http://localhost:5001/docs |
+| Qdrant | http://localhost:6333 |
+| Ollama API | http://localhost:11434 |
+
+Inside Docker Compose, the backend should connect to the services using their service names, for example `http://qdrant:6333` and `http://ollama:11434/api/chat`, rather than `localhost`.
+
+Stop the services without deleting persistent named volumes:
+
+```bash
+docker compose down
+```
+
+Qdrant and Ollama data should be stored in Docker named volumes so the database and downloaded model persist when containers are recreated. Avoid `docker compose down -v` unless you intentionally want to remove those volumes and their data.
 ---
 
 # Usage
