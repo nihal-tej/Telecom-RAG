@@ -421,9 +421,11 @@ Stop the services without deleting persistent named volumes:
 ```bash
 docker compose down
 ```
-
 Qdrant and Ollama data should be stored in Docker named volumes so the database and downloaded model persist when containers are recreated. Avoid `docker compose down -v` unless you intentionally want to remove those volumes and their data.
+
 ---
+
+
 
 # Usage
 
