@@ -2,8 +2,8 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import torch
-from query_gen import get_query
-from query_retrival import make_retrival
+from harsha.query_gen import get_query
+from harsha.query_retrival import make_retrival
 
 # importing llm router function from your core logic script
 app = Flask(__name__)
@@ -12,7 +12,7 @@ CORS(app)
 # route for processing the query or the kpi file
 @app.route('/api/process', methods=['POST'])
 def process_request():
-    # ---- SCENARIO A: KPI File Upload ----
+    #  kpi file Upload 
     if 'file' in request.files:
         uploaded_file = request.files['file']
         file_name = uploaded_file.filename
@@ -31,7 +31,7 @@ def process_request():
             "result": backend_result # standardized key to match streamlit query display
         })
         
-    # ---- SCENARIO B: Plain Text Query ----
+    # plain text query
     elif request.is_json:
         json_data = request.get_json()
         user_query = json_data.get('data')

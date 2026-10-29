@@ -1,10 +1,36 @@
 import pandas as pd
 import joblib
-import torch
+# import torch
 import shap
 import io
+import requests 
 from pypdf import PdfReader
-from unsloth import FastLanguageModel
+# from unsloth import FastLanguageModel
+import os
+
+import os
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+PICKLE_DIR = os.path.join(
+    BASE_DIR,
+    "Anamoly_detection",
+    "pickle files"
+)
+
+LABEL_ENCODER_PATH = os.path.join(PICKLE_DIR, "label_encoder.pkl")
+SCALER_PATH = os.path.join(PICKLE_DIR, "scaler.pkl")
+MODEL_PATH = os.path.join(PICKLE_DIR, "model.pkl")
+
+OLLAMA_URL = os.getenv(
+    "OLLAMA_URL",
+    "http://host.docker.internal:11434/api/chat"
+)
+
+OLLAMA_MODEL = os.getenv(
+    "OLLAMA_MODEL",
+    "qwen2.5:7b"
+)
 
 ## creates dynamic prompt by shap ,as we can take static features which cause anaomaly by model which has highest weight or priority based how it had trained ,
 ## it creates dynamic prompt based on exact metric causing the anomaly for specific row/test case .
@@ -23,11 +49,9 @@ def build_dynamic_kpi_description(row, prediction, top_features_dict):
     """
 
 ## Query genaration by Qwen2.5-7B model , which can be sent for RAG retrival.
-def rewrite_query(description, model, tokenizer):
-    messages = [
-        {
-            "role": "system",
-            "content": """
+def rewrite_query(description):
+          
+    system_prompt="""
             You are a senior LTE/5G Radio Access Network (RAN) optimization engineer.
 
             Your task is NOT to diagnose the network problem.
@@ -91,21 +115,30 @@ def rewrite_query(description, model, tokenizer):
 
             Return ONLY the retrieval query.
             """
-        },
-        {
-            "role": "user",
-            "content": description
+    response = requests.post(
+        OLLAMA_URL,
+        json={
+            "model": OLLAMA_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": description
+                }
+            ],
+            "stream": False,
+            "options": {
+                "temperature": 0
+            }
         }
-    ]
-    text = tokenizer.apply_chat_template(messages,tokenize=False,add_generation_prompt=True)
+    )
 
-    inputs = tokenizer(text,return_tensors="pt").to(model.device)
+    response.raise_for_status()
 
-    outputs = model.generate(**inputs,max_new_tokens=120,do_sample=False)
-
-    generated = outputs[0][inputs.input_ids.shape[1]:]
-
-    query = tokenizer.decode(generated,skip_special_tokens=True).strip()
+    query = response.json()["message"]["content"].strip()
 
     return query
 def get_query(filename,file_bytes):
@@ -114,14 +147,14 @@ def get_query(filename,file_bytes):
         # io.BytesIO wraps the raw bytes so pandas can read it like a real file
         df = pd.read_csv(io.BytesIO(file_bytes),sep=';')
     # loading the model and the tokenizer
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="Qwen/Qwen2.5-7B-Instruct",
-        max_seq_length=8192,
-        dtype=torch.float16,
-        load_in_4bit=True,
-    )
+    # model, tokenizer = FastLanguageModel.from_pretrained(
+    #     model_name="Qwen/Qwen2.5-7B-Instruct",
+    #     max_seq_length=8192,
+    #     dtype=torch.float16,
+    #     load_in_4bit=True,
+    # )
 
-    FastLanguageModel.for_inference(model)
+    # FastLanguageModel.for_inference(model)
     ## cols which are in Full KPI file which are not usefull.
     drop_cols = [
         "ue_ident", "id_ue", "timestamp", 'mac_pci', 'mac_cc_idx', 'mac_dl_ri', 
@@ -131,17 +164,18 @@ def get_query(filename,file_bytes):
     ]
     df = df.drop(columns=drop_cols, errors='ignore')
     
+    
     # feature preprocessing:
     ## load label_encoder which is used during training
-    le = joblib.load('..../label_encoder.pkl')
+    le = joblib.load(LABEL_ENCODER_PATH)
     df["mob_pattern"] = le.transform(df["mob_pattern"]) 
     X=df
     ## load standardscaler from training file
-    scaler = joblib.load('..../scaler.pkl')
+    scaler = joblib.load(SCALER_PATH)
     X_scaled = scaler.transform(X) 
     
     # inference model loading
-    xgb_model = joblib.load('..../model.pkl')
+    xgb_model = joblib.load(MODEL_PATH)
     predictions = xgb_model.predict(X_scaled)
     
     # initialize shap explainer ,which targets our xgboost model
@@ -165,7 +199,7 @@ def get_query(filename,file_bytes):
         description = build_dynamic_kpi_description(X.iloc[row_idx], pred, top_4_values)        
         
         # rca query for our input KPI data 
-        rca_query= rewrite_query(description, model, tokenizer)
+        rca_query= rewrite_query(description)
         return rca_query,True
     else:
         return f"uploaded KPI file {filename} is classified as Normal. Skipping RCA Retrieval pipeline as there is no Anomaly detected ,Everything is fine from your KPI data.",False

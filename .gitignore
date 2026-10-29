@@ -1,0 +1,12 @@
+# Ignore specific files
+.env
+config.secrets.json
+
+# Ignore entire folders
+hv/
+dist/
+.vscode/
+
+# Ignore files matching a specific pattern (e.g., all log files)
+*.log
+*.DS_Store

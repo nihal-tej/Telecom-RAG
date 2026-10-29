@@ -1,0 +1,28 @@
+
+FROM python:3.11-slim
+
+WORKDIR /Telecom_project
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    torch==2.6.0+cpu && \
+    pip install --no-cache-dir -r requirements.txt
+
+COPY app/ /Telecom_project/app/
+COPY Final_Data/ /Telecom_project/Final_Data/
+COPY Anamoly_detection/ /Telecom_project/Anamoly_detection/
+
+ENV OLLAMA_URL=http://host.docker.internal:11434/api/chat
+
+EXPOSE 5001
+
+CMD ["uvicorn", "app.r_server:app", "--host", "0.0.0.0", "--port", "5001"]

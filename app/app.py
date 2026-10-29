@@ -42,7 +42,7 @@ if input_type == "Plain Text Query":
 else:
     # subheader for uploading kpi file
     st.subheader("📁 Upload KPI File")
-    uploaded_file = st.file_uploader("Upload your KPI document in the start 46 col format (in CSV):", type=["csv"])
+    uploaded_file = st.file_uploader("Upload your KPI document (CSV, Excel, or PDF):", type=["csv", "xlsx", "pdf"])
     
     # button for processing the file
     if st.button("Process File", type="primary"):

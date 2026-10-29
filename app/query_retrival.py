@@ -2,21 +2,54 @@ import os
 import re
 import json
 import pickle
-import torch
 import pandas as pd
 from rank_bm25 import BM25Okapi
 from qdrant_client import QdrantClient
-from unsloth import FastLanguageModel
 from sentence_transformers import SentenceTransformer, CrossEncoder
+import requests
+import torch
+
+if torch.backends.mps.is_available():
+    DEVICE = "mps"
+elif torch.cuda.is_available():
+    DEVICE = "cuda"
+else:
+    DEVICE = "cpu"
 
 # defining the qdrant path,model and bm25 directory
-QDRANT_PATH = "./qdrant_db"
-BM25_DIR = "./bm25_indices"
-MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FINAL_DATA_DIR = os.path.join(BASE_DIR,"Final_Data")
+QDRANT_PATH = os.path.join(FINAL_DATA_DIR,"qdrant_db")
+BM25_DIR = os.path.join(FINAL_DATA_DIR,"bm25_indices")
 
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+OLLAMA_URL = os.getenv(
+    "OLLAMA_URL",
+    "http://host.docker.internal:11434/api/chat"
+)
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+
+client = QdrantClient(url=QDRANT_URL)
+def ollama_chat(messages, max_tokens=512):
+    response = requests.post(
+        OLLAMA_URL,
+        json={
+            "model": OLLAMA_MODEL,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": 0,
+                "num_predict": max_tokens
+            }
+        }
+    )
+
+    response.raise_for_status()
+
+    return response.json()["message"]["content"].strip()
 # initializing the top k per collection and context token budget
-TOP_K_PER_COLLECTION = 30 
-CONTEXT_TOKEN_BUDGET = 8000
+TOP_K_PER_COLLECTION = 20
+CONTEXT_TOKEN_BUDGET = 4000
 
 # directory initialization for bm25 caches
 os.makedirs(BM25_DIR, exist_ok=True)
@@ -24,31 +57,31 @@ os.makedirs(BM25_DIR, exist_ok=True)
 # data collection of all the chunk files and bm25 files
 COLLECTION_REGISTRY = {
     "data_plane": {
-        "chunks_file": "..../data_plane_chunks.jsonl",
+        "chunks_file": os.path.join(FINAL_DATA_DIR,"data_plane.jsonl"),
         "bm25_file": os.path.join(BM25_DIR, "data_plane_bm25.pkl")
     },
     "multi_access_edge": {
-        "chunks_file": "..../edge_chunks.jsonl",
-        "bm25_file": os.path.join(BM25_DIR, "edge_bm25.pkl")
+        "chunks_file": os.path.join(FINAL_DATA_DIR,"edge.jsonl"),
+        "bm25_file": os.path.join(BM25_DIR, "multi_access_edge_bm25.pkl")
     },
     "l2-l3-protocol-logic": {
-        "chunks_file": "..../l_2_3_chunks.jsonl",
-        "bm25_file": os.path.join(BM25_DIR, "l2_l3_bm25.pkl")
+        "chunks_file": os.path.join(FINAL_DATA_DIR,"l_2_3.jsonl"),
+        "bm25_file": os.path.join(BM25_DIR, "l2-l3-protocol-logic_bm25.pkl")
     },
     "physical_mac_layer": {
-        "chunks_file": "..../mac_layer_chunks.jsonl",
-        "bm25_file": os.path.join(BM25_DIR, "mac_layer_bm25.pkl")
+        "chunks_file": os.path.join(FINAL_DATA_DIR,"mac_layer.jsonl"),
+        "bm25_file": os.path.join(BM25_DIR, "physical_mac_layer_bm25.pkl")
     },
     "o_ran_kpi": {
-        "chunks_file": "..../o-kpi_chunks.jsonl",
+        "chunks_file": os.path.join(FINAL_DATA_DIR,"o-kpi.jsonl"),
         "bm25_file": os.path.join(BM25_DIR, "o_ran_kpi_bm25.pkl")
     },
     "o_ran_management": {
-        "chunks_file": "..../o-query_chunks.jsonl",
+        "chunks_file": os.path.join(FINAL_DATA_DIR,"o-query.jsonl"),
         "bm25_file": os.path.join(BM25_DIR, "o_ran_management_bm25.pkl")
     },
     "ran_architecture": {
-        "chunks_file": "..../ran_arch_chunks.jsonl",
+        "chunks_file": os.path.join(FINAL_DATA_DIR,"ran_arch.jsonl"),
         "bm25_file": os.path.join(BM25_DIR, "ran_architecture_bm25.pkl")
     }
 }
@@ -137,20 +170,34 @@ def multi_collection_rrf(all_dense_results, all_bm25_results, k=60):
     return [doc_store[key] for key in sorted_keys]
 
 # function for reranking the retrieved candidates using a cross-encoder reranker
-def rerank(query, candidates, reranker, top_n=50):
-    if not candidates: return []
+def rerank(query, candidates, reranker, top_n=20):
+    if not candidates:
+        return []
+
+    candidates = candidates[:20]
+
     pairs = [[query, item["payload"]["text"]] for item in candidates]
-    scores = reranker.predict(pairs)
+
+    scores = reranker.predict(
+        pairs,
+        batch_size=2,
+        show_progress_bar=False
+    )
+
     reranked = []
+
     for item, score in zip(candidates, scores):
         if item["payload"].get("source") in ["dictionary", "vocabulary"]:
-            score = score * 0.8 if score > 0 else score * 1.2      
+            score = score * 0.8 if score > 0 else score * 1.2
+
         reranked.append((score, item))
+
     reranked.sort(reverse=True, key=lambda x: x[0])
+
     return reranked[:top_n]
 
 # function for building context using top_chunks
-def build_context(top_chunks, tokenizer, max_tokens=6000):
+def build_context(top_chunks, max_tokens=6000):
     context, citations = "", []
     current_tokens = 0
     for score, item in top_chunks:
@@ -160,7 +207,7 @@ def build_context(top_chunks, tokenizer, max_tokens=6000):
             f"{payload.get('text', '')}\n"
             f"----------------------------------------\n"
         )
-        chunk_tokens = len(tokenizer.encode(chunk_str, add_special_tokens=False))
+        chunk_tokens = len(chunk_str.split())
         if current_tokens + chunk_tokens > max_tokens:
             break
         context += chunk_str
@@ -175,50 +222,70 @@ def build_context(top_chunks, tokenizer, max_tokens=6000):
     return context, citations
 
 # function for generating the answer
-def generate_answer(query, context, citations, tokenizer, llm):
+def generate_answer(query, context, citations):
+
     messages = [
         {
             "role": "system",
-            "content": """You are an expert in 3GPP and O-RAN standards. 
-                Your task is to answer the query based on the provided context.
+            "content": """
+            You are an expert in 3GPP and O-RAN standards.
 
-                Guidelines:
-                1. Analyze the context to find the answer based on logically supported by the facts.
-                2. Output the result with easy understanding with facts including it ,also only for query with a good explanation .
-                """
+            Your task is to answer the query based on the provided context.
+
+            Guidelines:
+
+            1. Analyze the context to find the answer based on logically
+               supported facts.
+
+            2. Output the result with easy understanding with facts
+               including it, also only for query with a good explanation.
+            """
         },
         {
             "role": "user",
             "content": f"""
             Context:
+
             {context}
 
             Question:
+
             {query}
 
-            Also you can use your knowledge if it is relevant and your are sure about it."""
+            Also you can use your knowledge if it is relevant
+            and you are sure about it.
+            """
         }
     ]
-    # applying the tokenizer on the text
-    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(text, return_tensors="pt").to(llm.device)
-    with torch.no_grad():
-        # generating using llm
-        outputs = llm.generate(**inputs, max_new_tokens=512, do_sample=False, pad_token_id=tokenizer.eos_token_id)
-        
-    # decoding the answer from a tokenizer
-    answer = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+
+    answer = ollama_chat(
+        messages,
+        max_tokens=512
+    )
+
+    print(context)
+
     answer += "\n\nSources:\n"
+
     seen = set()
+
     for c in citations:
-        cit_str = f"- TS {c['spec']} | Section {c['section']} | {c['title']}"
+
+        cit_str = (
+            f"- TS {c['spec']} | "
+            f"Section {c['section']} | "
+            f"{c['title']}"
+        )
+
         if cit_str not in seen:
+
             answer += cit_str + "\n"
             seen.add(cit_str)
+
     return answer
 
 # function for routing the query with llm
-def route_query_with_llm(query,tokenizer,llm,sw):
+def route_query_with_llm(query,sw):
     # defining all the collection definitions
     collection_definitions = """
         - "data_plane": General vocabularies, dictionaries, and broad network data data analytics frameworks. Holds: 21.905, 23.288.
@@ -249,19 +316,34 @@ def route_query_with_llm(query,tokenizer,llm,sw):
 
             Example: "Explain F1-C interface routing drops during context setup" -> ran_architecture"""
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Query: {query}"}
-    ]
-    # applying tokenizer with the text
-    text=tokenizer.apply_chat_template(messages,tokenize=False,add_generation_prompt=True)
-    inputs=tokenizer(text,return_tensors="pt").to(llm.device)
-    with torch.no_grad():
-        # generating output by llm
-        outputs=llm.generate(**inputs,max_new_tokens=32,do_sample=False,pad_token_id=tokenizer.eos_token_id)
+    # messages = [
+    #     {"role": "system", "content": system_prompt},
+    #     {"role": "user", "content": f"Query: {query}"}
+    # ]
+    # # applying tokenizer with the text
+    # text=tokenizer.apply_chat_template(messages,tokenize=False,add_generation_prompt=True)
+    # inputs=tokenizer(text,return_tensors="pt").to(llm.device)
+    # with torch.no_grad():
+    #     # generating output by llm
+    #     outputs=llm.generate(**inputs,max_new_tokens=32,do_sample=False,pad_token_id=tokenizer.eos_token_id)
     
-    # decoding raw response by a tokenizer
-    raw_response=tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:],skip_special_tokens=True)
+    # # decoding raw response by a tokenizer
+    # raw_response=tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:],skip_special_tokens=True)
+    messages = [
+    {
+        "role": "system",
+        "content": system_prompt
+    },
+    {
+        "role": "user",
+        "content": f"Query: {query}"
+    }
+    ]
+
+    raw_response = ollama_chat(
+    messages,
+    max_tokens=32
+)
     pred_coll=[c.strip()  for c in raw_response.split(",") if c.strip() in available_collections]
     if not pred_coll:
         if sw==0:
@@ -276,24 +358,24 @@ def route_query_with_llm(query,tokenizer,llm,sw):
 def make_retrival(eval_data,sw):
     print("Initializing Unified Search Pipeline Engine...")
     # loading the embedding model
-    embed_model = SentenceTransformer("BAAI/bge-large-en-v1.5", device="cuda")
+    embed_model = SentenceTransformer("BAAI/bge-large-en-v1.5", device=DEVICE)
     # loading cross-encoder using reranker
-    reranker = CrossEncoder("BAAI/bge-reranker-v2-m3", device="cuda")
+    reranker = CrossEncoder("BAAI/bge-reranker-v2-m3", device=DEVICE)
     # loading the client using qdrant client path
-    client = QdrantClient(path=QDRANT_PATH)
+    # client = QdrantClient(path=QDRANT_URL)
     # loading the llm and the tokenizer using a model
-    llm, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=MODEL_NAME,
-        max_seq_length=8192,
-        dtype=torch.float16,
-        load_in_4bit=True,
-    )
+    # llm, tokenizer = FastLanguageModel.from_pretrained(
+    #     model_name=MODEL_NAME,
+    #     max_seq_length=8192,
+    #     dtype=torch.float16,
+    #     load_in_4bit=True,
+    # )
 
-    # initializing the llm for reference
-    FastLanguageModel.for_inference(llm)
+    # # initializing the llm for reference
+    # FastLanguageModel.for_inference(llm)
     query = eval_data
     
-    target_collections = route_query_with_llm(query,tokenizer,llm,sw)           
+    target_collections = route_query_with_llm(query,sw)           
     print("=" * 100)
     print(f"QUERY: {query}")
     print(f"SEARCHING ACROSS COLLECTIONS: {target_collections}")
@@ -326,7 +408,7 @@ def make_retrival(eval_data,sw):
     reranked = rerank(query, candidates, reranker, top_n=50)
     top8 = reranked[:8]
     
-    context, citations = build_context(top8, tokenizer, max_tokens=CONTEXT_TOKEN_BUDGET)
-    answer = generate_answer(query, context, citations, tokenizer, llm)
+    context, citations = build_context(top8, max_tokens=CONTEXT_TOKEN_BUDGET)
+    answer = generate_answer(query, context, citations)
     # print("\nPREDICTED ANSWER:\n", answer)
     return answer
